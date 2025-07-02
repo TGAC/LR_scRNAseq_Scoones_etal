@@ -1,0 +1,455 @@
+---
+title: "Illumina_analysis"
+author: "Anita Ahlert Scoones, Macaulay Group, Earlham Institute"
+date: "2025-03-12"
+output: html_document
+---
+
+# Illumina scRNA-seq Data Processing Script
+# This script loads Feature Barcode Matrices for two Illumina samples and an integrated Seurat object.
+# Expected Folder Structure:
+# seurat_data/
+# ├── illumina/
+# │   ├── sample1/
+# │   │   ├── feature_bc_matrix/
+# │   ├── sample2/
+# │   │   ├── feature_bc_matrix/
+# │   ├── illumina_analysed_sobj.rds  <-- (Final integrated Seurat object for both samples)
+
+# Ensure you have downloaded the dataset and placed it in the `seurat_data/` directory.
+
+# To load the final processed integrated Seurat object
+# illumina_analysed <- readRDS(file.path(base_dir, "illumina_analysed_sobj.rds"))
+
+```{r 1 Package loading}
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+library(SingleR)
+library(viridis)
+library(reticulate)
+```
+
+```{r 2 Loading matrices}
+rm(list=ls())
+
+# Ensure Seurat v5 is installed
+if (packageVersion("Seurat") < "5.0.0") {
+  stop("Error: This script requires Seurat v5 or later. Please update Seurat.")
+}
+
+# Define base directory where "seurat_data" is stored
+base_dir <- "seurat_data/illumina"
+
+# Load Feature Barcode Matrices for individual samples
+illumina_fb_1 <- file.path(base_dir, "sample1/feature_bc_matrix")
+illumina_fb_2 <- file.path(base_dir, "sample2/feature_bc_matrix")
+
+# Read Feature Barcode Matrices
+fb_matrix_1 <- Read10X(illumina_fb_1)  # Load sample 1 matrix
+fb_matrix_2 <- Read10X(illumina_fb_2)  # Load sample 2 matrix
+```
+
+```{r 3 Initializing seurat objects}
+pbmc_illumina1 <- CreateSeuratObject(counts = fb_matrix_1, project = "Sample1")
+pbmc_illumina2 <- CreateSeuratObject(counts = fb_matrix_2, project = "Sample2")
+
+pbmc_illumina1[["sample"]] <- "sample1"
+pbmc_illumina2[["sample"]] <- "sample2"
+
+pbmc_illumina1 #4875 cells
+pbmc_illumina2 #7384 cells
+```
+
+```{r 4 Visualise nFeat nCount and percent.mt}
+pbmc_illumina1[["percent.mt"]] <- PercentageFeatureSet(pbmc_illumina1, pattern = "^MT-")
+pbmc_illumina2[["percent.mt"]] <- PercentageFeatureSet(pbmc_illumina2, pattern = "^MT-")
+
+VlnPlot(pbmc_illumina1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(pbmc_illumina2, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+```
+
+```{r 5 Quantile QC subsetting}
+# Define a function to calculate lb and ub, and filter the Seurat object
+filter_seurat <- function(seurat_obj) {
+  lb <- quantile(seurat_obj[["nFeature_RNA"]]$nFeature_RNA, probs = 0.01)
+  ub <- quantile(seurat_obj[["nFeature_RNA"]]$nFeature_RNA, probs = 0.99)
+  
+  subsetted_seurat <- seurat_obj[, seurat_obj[["nFeature_RNA"]] > lb & seurat_obj[["nFeature_RNA"]] < ub & seurat_obj[["percent.mt"]] < 15]
+  
+  return(subsetted_seurat)
+}
+
+# To store feature quantiles of each dataset
+#lb_1 <- quantile(pbmc_illumina1[["nFeature_RNA"]]$nFeature_RNA, probs = 0.01)
+#ub_1 <- quantile(pbmc_illumina1[["nFeature_RNA"]]$nFeature_RNA, probs = 0.99)
+#lb_2 <- quantile(pbmc_illumina2[["nFeature_RNA"]]$nFeature_RNA, probs = 0.01)
+#ub_2 <- quantile(pbmc_illumina2[["nFeature_RNA"]]$nFeature_RNA, probs = 0.99)
+
+# Apply the function to each Seurat object
+pbmc_subset_illumina1 <- filter_seurat(pbmc_illumina1) 
+pbmc_subset_illumina2 <- filter_seurat(pbmc_illumina2) 
+
+#Visualise
+VlnPlot(pbmc_subset_illumina1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(pbmc_subset_illumina2, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) 
+
+FeatureScatter(pbmc_subset_illumina1, feature1 = "nFeature_RNA", feature2 = "percent.mt", cols = "#00bfc4") + NoLegend()
+FeatureScatter(pbmc_subset_illumina2, feature1 = "nFeature_RNA", feature2 = "percent.mt", cols = "#00bfc4") + NoLegend()
+
+```
+
+```{r 6 Merge for plotting only}
+# Merge (before integration)
+merged_PBMC <- merge(pbmc_subset_illumina1, y = pbmc_subset_illumina2)
+print(merged_PBMC)
+
+# Define your features of interest
+features_of_interest <- c("nFeature_RNA", "nCount_RNA", "percent.mt")
+
+# Assuming "Sample" is the column in your metadata to split by
+split_by_column <- "sample"
+
+# Create the violin plot with color based on the viridis palette
+plots <- lapply(features_of_interest, function(feature) {
+  VlnPlot(object = merged_PBMC,
+          features = feature,
+          split.by = split_by_column, group.by = "sample",
+          cols = viridis(3),
+          pt.size = 0)
+})
+
+
+plot1 <- plots[[1]] + theme(axis.text.x = element_blank(),
+                   axis.title.x = element_blank()) +
+  theme(legend.position="none")
+plot2 <- plots[[2]] + theme(axis.text.x = element_blank(),
+                   axis.title.x = element_blank()) +
+  theme(legend.position="none")
+plot3 <- plots[[3]] + theme(axis.text.x = element_blank(),
+                   axis.title.x = element_blank()) +
+  guides(fill = guide_legend(title = "Sample"))
+
+plot1 | plot2 | plot3
+```
+
+```{r 7 Pre-processing without integration}
+merged_PBMC <- NormalizeData(object = merged_PBMC)
+merged_PBMC <- FindVariableFeatures(object = merged_PBMC)
+merged_PBMC <- ScaleData(object = merged_PBMC)
+merged_PBMC <- RunPCA(object = merged_PBMC)
+```
+
+```{r 8 Perform integration using Seurat v5's CCA-based method}
+# Perform Seurat v5 integration using CCA
+PBMC_integrated <- IntegrateLayers(
+  object = merged_PBMC, 
+  method = "CCAIntegration",   # Using anchor-based CCA
+  orig.reduction = "pca", 
+  new.reduction = "integrated.cca",
+  verbose = FALSE
+)
+
+PBMC_integrated
+```
+
+```{r 9 Perform clustering and UMAP on integrated dataset}
+cluster_and_reduce <- function(seurat_obj, dims = 1:30, reduction_method = "integrated.cca", resolutions = c(0.4, 0.6, 0.8, 1)) {
+  seurat_obj <- FindNeighbors(seurat_obj, dims = dims, reduction = reduction_method)
+  seurat_obj <- FindClusters(seurat_obj, resolution = resolutions, verbose = FALSE)
+  seurat_obj <- RunUMAP(seurat_obj, dims = dims, reduction = reduction_method)
+  
+  return(seurat_obj)
+}
+
+# Apply clustering and UMAP visualization
+PBMC_integrated <- cluster_and_reduce(PBMC_integrated)
+
+# Use res 0.8 as cluster idents
+Idents(PBMC_integrated) <- PBMC_integrated@meta.data$RNA_snn_res.0.8
+PBMC_integrated@meta.data$seurat_clusters <- PBMC_integrated@meta.data$RNA_snn_res.0.8
+
+# Collapses the individual datasets together and recreates the original counts and data layers
+PBMC_integrated <- JoinLayers(PBMC_integrated)
+PBMC_integrated
+```
+
+```{r 10.1 sctype annotation code https://github.com/IanevskiAleksandr/sc-type}
+# Load required libraries for ScType annotation
+library(openxlsx)
+
+lapply(c("dplyr","Seurat","HGNChelper"), library, character.only = T)
+
+# Load the gene set preparation and scoring functions from the ScType GitHub repository
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+# Define database file and specify the tissue type to use for annotation
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx"; tissue = "Immune system" # e.g. Immune 
+tissue <- "Immune system" 
+
+# Prepare gene sets based on the selected tissue
+gs_list = gene_sets_prepare(db_, tissue)
+
+# Check whether the Seurat object is in v4 or v5 format
+# (ScType extracts scRNA-seq data differently between Seurat versions)
+seurat_package_v5 <- isFALSE('counts' %in% names(attributes(PBMC_integrated[["RNA"]])));
+print(sprintf("Seurat object %s is used", ifelse(seurat_package_v5, "v5", "v4")))
+
+# Extract scaled scRNA-seq data matrix based on the Seurat version
+scRNAseqData_scaled <- if (seurat_package_v5) as.matrix(PBMC_integrated[["RNA"]]$scale.data) else as.matrix(PBMC_integrated[["RNA"]]@scale.data)
+
+# Run ScType to compute cell type scores per gene set
+es.max <- sctype_score(scRNAseqData = scRNAseqData_scaled, scaled = TRUE, gs = gs_list$gs_positive, gs2 = gs_list$gs_negative)
+
+# Aggregate ScType scores by cluster
+cL_resutls <- do.call("rbind", lapply(unique(PBMC_integrated@meta.data$seurat_clusters), function(cl){
+    # Aggregate ScType scores by cluster
+es.max.cl = sort(rowSums(es.max[ ,rownames(PBMC_integrated@meta.data[PBMC_integrated@meta.data$seurat_clusters==cl, ])]), decreasing = !0) # Select top cell type predictions for each cluster
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(PBMC_integrated@meta.data$seurat_clusters==cl)), 10)
+}))
+
+# Identify the top-scoring predicted cell type per cluster
+sctype_scores <- cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# Assign "Unknown" label to clusters with low confidence scores
+# If a cluster's ScType score is below 25% of the number of cells, classify it as "Unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] <- "Unknown"
+
+# Print the final assigned cell type classifications
+print(sctype_scores[,1:3])
+
+# Print the final assigned cell type classifications
+PBMC_integrated@meta.data$sctype_classification = "" # Initialize metadata column
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  PBMC_integrated@meta.data$sctype_classification[PBMC_integrated@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+```
+
+```{r 10.2 COMBINE VISUALIZATIONS: UMAP & CELL TYPE HIERARCHY}
+# Load required libraries for visualization
+lapply(c("ggraph", "igraph", "tidyverse", "data.tree"), library, character.only = T)
+
+# ---------------------
+# PREPARING THE EDGES 
+# ---------------------
+# The edges define connections between clusters and their predicted cell types
+cL_resutls <- cL_resutls[order(cL_resutls$cluster), ]  # Order by cluster ID
+edges <- cL_resutls
+edges$type <- paste0(edges$type, "_", edges$cluster)  # Label each type with its cluster ID
+edges$cluster <- paste0("cluster ", edges$cluster)  # Rename clusters for visualization
+edges <- edges[, c("cluster", "type")]  # Keep only cluster and type columns
+colnames(edges) <- c("from", "to")  # Rename columns for graph compatibility
+rownames(edges) <- NULL  # Remove row names
+
+# ---------------------
+# PREPARING THE NODES
+# ---------------------
+# Nodes represent the clusters (Level 1) and the assigned cell types (Level 2)
+
+# Create Level 1 nodes (clusters)
+nodes_lvl1 <- sctype_scores[, c("cluster", "ncells")]  # Extract clusters and cell counts
+nodes_lvl1$cluster <- paste0("cluster ", nodes_lvl1$cluster)  # Label clusters
+nodes_lvl1$Colour <- "#f1f1ef"  # Set cluster color
+nodes_lvl1$ord <- 1  # Define order level (1 = cluster level)
+nodes_lvl1$realname <- nodes_lvl1$cluster  # Store real names of clusters
+nodes_lvl1 <- as.data.frame(nodes_lvl1)  # Ensure it's a dataframe
+
+# Initialize Level 2 nodes (cell type annotations)
+nodes_lvl2 <- c()
+ccolss <- c("#5f75ae", "#92bbb8", "#64a841", "#e5486e", "#de8e06", "#eccf5a", 
+            "#b5aa0f", "#e4b680", "#7ba39d", "#b15928", "#ffff99", "#6a3d9a",
+            "#cab2d6", "#ff7f00", "#fdbf6f", "#e31a1c", "#fb9a99", "#33a02c",
+            "#b2df8a", "#1f78b4", "#a6cee3")  # Define colors for each cluster
+
+# Create Level 2 nodes (cell type names per cluster)
+for (i in 1:length(unique(cL_resutls$cluster))) {
+  dt_tmp <- cL_resutls[cL_resutls$cluster == unique(cL_resutls$cluster)[i], ]  
+  nodes_lvl2 <- rbind(nodes_lvl2, 
+                      data.frame(cluster = paste0(dt_tmp$type, "_", dt_tmp$cluster), 
+                                 ncells = dt_tmp$scores, 
+                                 Colour = ccolss[i], 
+                                 ord = 2,  # Define order level (2 = cell type level)
+                                 realname = dt_tmp$type))
+}
+
+# Merge Level 1 and Level 2 nodes
+nodes <- rbind(nodes_lvl1, nodes_lvl2)
+nodes$ncells[nodes$ncells < 1] <- 1  # Ensure minimum value of 1 for visualization scaling
+
+# ---------------------
+# MATCHING CELL TYPE NAMES TO DATABASE
+# ---------------------
+files_db <- openxlsx::read.xlsx(db_)[, c("cellName", "shortName")]  # Load cell type database
+files_db <- unique(files_db)  # Remove duplicate entries
+nodes <- merge(nodes, files_db, all.x = T, all.y = F, by.x = "realname", by.y = "cellName", sort = F)
+
+# If no short name is found, use the real name
+nodes$shortName[is.na(nodes$shortName)] <- nodes$realname[is.na(nodes$shortName)]
+
+# Keep relevant columns
+nodes <- nodes[, c("cluster", "ncells", "Colour", "ord", "shortName", "realname")]
+
+# Remove duplicated node names
+duplicated_nodes <- nodes$cluster[duplicated(nodes$cluster)]
+nodes <- nodes[!duplicated(nodes$cluster), ]
+
+# ---------------------
+# CREATE GRAPH OBJECT
+# ---------------------
+mygraph <- graph_from_data_frame(edges, vertices = nodes)  # Convert data into graph format
+
+# ---------------------
+# PLOTTING THE CELL TYPE HIERARCHY (CIRCLE PACKING)
+# ---------------------
+gggr <- ggraph(mygraph, layout = 'circlepack', weight = I(ncells)) + 
+  # First level (clusters) - light grey background with grey borders
+  geom_node_circle(aes(filter = ord == 1, fill = I("#F5F5F5"), colour = I("#D3D3D3")), alpha = 0.9) + 
+  # Second level (cell types) - colored circles with grey borders
+  geom_node_circle(aes(filter = ord == 2, fill = I(Colour), colour = I("#D3D3D3")), alpha = 0.9) +
+  # Remove axes and background
+  theme_void() + 
+  # Add text labels for cell types inside circles
+  geom_node_text(aes(filter = ord == 2, label = shortName, colour = I("#ffffff"), fill = "white", 
+                     repel = FALSE, parse = TRUE, size = I(log(ncells, 25) * 1.5))) + 
+  # Add cluster labels outside circles with dotted lines
+  geom_node_label(aes(filter = ord == 1, label = shortName, colour = I("#000000"), size = I(3), fill = "white", parse = TRUE), 
+                  repel = TRUE, segment.linetype = "dotted") + 
+  NoLegend()  # Remove the legend
+
+library(gridExtra)
+
+# Create UMAP plot with cell type annotations
+dim_plot <- DimPlot(PBMC_integrated, reduction = "umap", label = TRUE, repel = TRUE, cols = ccolss)
+
+# Arrange UMAP and ScType visualization side by side
+grid.arrange(dim_plot, gggr, ncol = 2)
+```
+
+```{r 11 Cell Type Prediction using SingleR} 
+# Load required libraries
+library(SingleR)    # Single-cell annotation tool
+library(celldex)    # Pre-built reference datasets
+library(tidyverse)  # Tidyverse for data handling
+library(pheatmap)   # Heatmap visualization
+
+# -------------------------------------
+# Load Human Primary Cell Atlas Reference Data
+# -------------------------------------
+# This dataset provides pre-annotated reference profiles for human cell types
+ref <- celldex::HumanPrimaryCellAtlasData()
+
+# View reference dataset structure (uncomment to explore)
+# View(as.data.frame(colData(ref)))
+
+# -------------------------------------
+# Extract Count Matrix from Seurat Object
+# -------------------------------------
+# SingleR requires a raw count matrix, so we extract it from the RNA assay
+illumina_counts <- PBMC_integrated[["RNA"]]$counts
+
+# -------------------------------------
+# Run SingleR Annotation
+# -------------------------------------
+# This step performs automated cell type annotation for each individual cell 
+pred <- SingleR(
+  test = illumina_counts,  # Query dataset (scRNA-seq counts from PBMC dataset)
+  ref = ref,               # Reference dataset (Human Primary Cell Atlas)
+  labels = ref$label.main  # Use main cell type labels for annotation
+)
+
+# View first few rows of annotation results
+head(pred)
+
+# -------------------------------------
+# Store SingleR Annotations in Seurat Object
+# -------------------------------------
+# Map SingleR-predicted labels to the corresponding cells in PBMC_integrated
+PBMC_integrated$singleR.labels <- pred$labels[match(rownames(PBMC_integrated@meta.data), rownames(pred))]
+
+# -------------------------------------
+# Explore Annotation Results
+# -------------------------------------
+# Print predicted labels and confidence scores
+pred
+pred$scores
+
+# -------------------------------------
+# Visualizing SingleR Results
+# -------------------------------------
+
+# Heatmap of annotation scores across all cell types
+plotScoreHeatmap(pred)
+
+# Plot delta distribution (used to assess confidence in cell type assignment)
+plotDeltaDistribution(pred)
+
+# -------------------------------------
+# Generate Clustered Heatmap of Predicted Cell Types
+# -------------------------------------
+# Create a contingency table comparing SingleR labels to Seurat clusters
+tab <- table(Assigned = pred$labels, Clusters = PBMC_integrated$seurat_clusters)
+
+# Log-scale heatmap visualization of the annotation distribution across clusters
+pheatmap(log10(tab + 10), color = colorRampPalette(c('white', 'blue'))(10))
+
+# -------------------------------------
+# UMAP Visualization of SingleR Labels
+# -------------------------------------
+DimPlot(PBMC_integrated, group.by = "singleR.labels")  # Color cells by SingleR annotation
+```
+
+```{r 12 FindMarkers for manual cell type annotation}
+# -------------------------------------
+# FindMarkers for Manual Cell Type Annotation
+# -------------------------------------
+
+# Identify differentially expressed genes for each cluster to validate cell type annotations.
+
+PBMC_markers <- FindAllMarkers(PBMC_integrated, only.pos = TRUE)
+
+PBMC_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC) -> top10
+
+# visualise markers with a heatmap
+DoHeatmap(PBMC_integrated, features = top10$gene) + NoLegend()
+```
+
+```{r 13 Final Cell Type Annotations for Publication}
+
+# These cell type labels were assigned by integrating multiple sources of annotation:
+# - **SingleR predictions**
+# - **ScType predictions**
+# - **FindMarkers results**: Differentially expressed genes identified for each cluster.
+# - **Biological context**: Interpretation based on known immune cell markers.
+
+
+# Define final cell type labels for each cluster
+annotations <- c(
+  "Tcells:CD4+", "Monocytes:CD14+", "Naive_Tcells:CD4+", "Naive_Tcells:CD4+", 
+  "CD8+_NKT-like_cells", "Naive_Tcells:CD8+", "T_cells:CD8+", "NK cells", 
+  "B_cells", "B_cells", "CD8+_NKT-like_cells", "Macrophages", "Tcells_reg:CD4+", 
+  "Monocytes:CD14+", "CD8+_NKT-like_cells", "DCs", "Platelets", "Plasmacytoid DCs"
+)
+
+# -------------------------------------
+# Assign Cluster Labels to Annotations
+# -------------------------------------
+# function extracts cluster IDs (e.g., 0, 1, 2, etc.)
+names(annotations) <- levels(PBMC_integrated)
+
+# -------------------------------------
+# Rename Seurat Clusters with Cell Type Annotations
+# -------------------------------------
+PBMC_integrated <- RenameIdents(PBMC_integrated, annotations)  # Update cluster names
+PBMC_integrated@meta.data$cell_types <- Idents(PBMC_integrated)  # Store in metadata
+
+# -------------------------------------
+# UMAP Visualization of Final Cell Type Annotations
+# -------------------------------------
+DimPlot(PBMC_integrated) | DimPlot(PBMC_integrated, group.by = "sample")  # Compare cell type annotations across samples
+```
+

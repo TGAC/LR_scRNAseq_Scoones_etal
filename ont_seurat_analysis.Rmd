@@ -1,0 +1,594 @@
+---
+title: "ONT_LRscRNAseq_SEURAT"
+author: "Anita Ahlert Scoones"
+date: "2025-03-12"
+output: html_document
+---
+
+# ONT scRNA-seq Data Processing Script
+
+# This script loads the ONT single-cell RNA-seq dataset, including gene-level and isoform-level expression matrices.
+# It also loads the final processed Seurat object.
+
+# Expected Folder Structure:
+# seurat_data/
+# ├── ont/
+# │   ├── genes_seurat.v3
+# │   ├── isoform_seurat.v3
+# │   ├── ont_analysed_sobj.rds  <-- (Final processed Seurat object for ONT)
+
+# Ensure you have downloaded the dataset and placed it in the `seurat_data/` directory.
+
+```{r Package loading}
+#library loading
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+library(tidyverse)
+library(patchwork)
+library(ggsankey)
+library(RColorBrewer)
+library(viridis)
+```
+
+```{r Setwd}
+#Clear out R before starting anything
+rm(list=ls())
+```
+
+```{r Data loading}
+# Define base directory where "data" is stored (assume user downloads it)
+base_dir <- "data/ont"
+
+# Load ONT single sample files
+genes_ont <- file.path(base_dir, "genes_seurat.v3")
+iso_ont <- file.path(base_dir, "isoform_seurat.v3")
+```
+
+```{r Read 10X matrices - Gene and Iso lvls }
+genes_matrix <- Read10X(genes_ont)
+iso_matrix <- Read10X(iso_ont)
+```
+
+```{r Initialize seurat object}
+ONT_so <- CreateSeuratObject(genes_matrix, min.cells = 5)
+ONT_so
+#when min.cells = 5 : 13394 features across 4897
+
+ONT_so[["iso"]] <- Seurat::CreateAssayObject(counts = iso_matrix, min.cells=5)
+ONT_so
+#33076 features across 4897 samples within 2 assays
+```
+
+```{r Meta data assignments}
+ONT_so$barcode <- colnames(ONT_so)
+ONT_so[["percent.mt"]] <- PercentageFeatureSet(ONT_so, pattern = "^MT")
+ONT_so$sample <- "sample1"
+ONT_so$library_type <- "ONT"
+ONT_so
+```
+
+```{r General stats pre-QC filtering}
+#Genes count Level 
+mean(ONT_so@meta.data$nCount_RNA) #3194.136
+range(ONT_so@meta.data$nCount_RNA) #150 24054 
+median(ONT_so@meta.data$nCount_RNA) #2951
+
+#Iso count Level
+mean(ONT_so@meta.data$nCount_iso) #1986
+range(ONT_so@meta.data$nCount_iso) #31-16111
+
+#Features level
+mean(ONT_so@meta.data$nFeature_RNA) #724 genes
+range(ONT_so@meta.data$nFeature_RNA) #21-4010
+
+#Iso level
+mean(ONT_so@meta.data$nFeature_iso) #458 isoforms
+range(ONT_so@meta.data$nFeature_iso) #17-2216
+```
+
+```{r Visualise QC statistics before subsetting cells on quality metrics}
+# violin plots for different QC stats
+features <- c('nCount_RNA', 'nFeature_RNA', 'nCount_iso', 'nFeature_iso', 'percent.mt')
+
+# make a violin plot for each QC metric
+raw_ONT_QC <- lapply(features, function(x){ VlnPlot(
+  ONT_so,
+  features = x,
+  group.by = 'sample',
+  pt.size=0) +
+  RotatedAxis() + 
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  xlab('') +
+  theme(plot.title = element_text(size=10, hjust=0.5))
+})
+
+wrap_plots(raw_ONT_QC, ncol= 5)
+```
+
+```{r Subset based on quality metrics (QC)}
+#quantiles
+
+# Define a function to calculate lb and ub, and filter the Seurat object
+filter_seurat <- function(seurat_obj) {
+  lb <- quantile(seurat_obj[["nFeature_RNA"]]$nFeature_RNA, probs = 0.01)
+  ub <- quantile(seurat_obj[["nFeature_RNA"]]$nFeature_RNA, probs = 0.99)
+  
+
+# ont lb = 1% 449.6 , up = 99% 1893.56 
+  
+subsetted_seurat <- seurat_obj[, seurat_obj[["nFeature_RNA"]] > lb & seurat_obj[["nFeature_RNA"]] < ub & seurat_obj[["percent.mt"]] < 15]
+  
+  return(subsetted_seurat)
+}
+
+# Apply the function to each Seurat object
+ONT_subset <- filter_seurat(ONT_so) # 4897 > 4328 cells
+
+ONT_subset_QC <- lapply(features, function(x){ VlnPlot(
+  ONT_subset,
+  features = x,
+  group.by = 'sample',
+  pt.size=0) +
+  RotatedAxis() +
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  xlab('') +
+  theme(plot.title = element_text(size=10, hjust=0.5))
+})
+
+wrap_plots(ONT_subset_QC, ncol= 5)
+```
+
+```{r Gene Level; sobj normalisation, var.feat, scaling, pca}
+ONT_subset <- NormalizeData(ONT_subset, normalization.method = "LogNormalize", scale.factor = 10000)
+ONT_subset <- FindVariableFeatures(ONT_subset, selection.method = "vst", nfeatures = 2000)
+ONT_subset_genes <- rownames(ONT_subset)
+ONT_subset <- ScaleData(ONT_subset, features = ONT_subset_genes)
+ONT_subset <- RunPCA(ONT_subset, features = VariableFeatures(object = ONT_subset))
+DimPlot(ONT_subset, reduction = "pca", dims = 1:2)
+ElbowPlot(ONT_subset)
+```
+
+```{r Gene Level; Clustering}
+# clustering on gene level = 13 clusters
+perform_clustering <- function(seurat_obj) {
+  seurat_obj <- FindNeighbors(object = seurat_obj, dims = 1:10) %>%
+    FindClusters(resolution = c(0.5, 0.8, 1)) %>%
+    RunUMAP(reduction.name = 'umap_RNA', dims = 1:10)
+  
+  return(seurat_obj)
+}
+
+ONT_subset <- perform_clustering(ONT_subset)
+
+DefaultAssay(ONT_subset) <- 'RNA'
+ONT_gene_clusters <- DimPlot(ONT_subset, reduction = 'umap_RNA')
+ONT_subset$seurat_clusters_RNA <- ONT_subset$seurat_clusters
+```
+
+```{r FindMarkers RNA}
+ont.RNA.markers <- FindAllMarkers(ONT_subset, only.pos = TRUE)
+ont.RNA.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+```
+
+```{r Isoform Level; sobj normalisation, var.feat, scaling, pca}
+DefaultAssay(ONT_subset) <- 'iso'
+
+# log normalize data
+ONT_subset <- NormalizeData(ONT_subset)
+# Get top 20k variable isoforms i
+ONT_subset <- FindVariableFeatures(ONT_subset, nfeatures=20000) 
+
+# scale data and run PCA
+ONT_subset <- ONT_subset %>%
+  ScaleData() %>%
+  RunPCA(reduction.name='pca_iso')
+
+DimPlot(ONT_subset, reduction = "pca_iso", dims = 1:2)
+```
+
+```{r Iso Level; Clustering}
+DefaultAssay(ONT_subset) <- 'iso' # ensure iso is active assay
+
+perform_iso_clustering <- function(seurat_obj) {
+  seurat_obj <- FindNeighbors(object = seurat_obj, dims = 1:10, graph.name='iso_sn') %>%
+    FindClusters(resolution = 0.8, graph.name='iso_sn') %>%
+    RunUMAP(reduction.name = 'umap_iso', dims = 1:10)
+  
+  return(seurat_obj)
+}
+
+ONT_subset <- perform_iso_clustering(ONT_subset)
+ONT_subset$seurat_clusters_iso <- ONT_subset$seurat_clusters
+```
+
+```{r FindMarkers ISO}
+DefaultAssay(ONT_subset) <- 'iso' # ensure iso is active assay
+ont.ISO.markers <- FindAllMarkers(ONT_subset, only.pos = TRUE)
+ont.ISO.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+```
+
+```{r UMAP plots}
+# plot clusters and samples on the UMAP
+p1 <- DimPlot(ONT_subset, group.by = 'seurat_clusters_iso', label=TRUE, reduction='umap_iso') +
+  NoLegend() + ggtitle('Isoform-level clusters')
+p2 <- DimPlot(ONT_subset, group.by = 'seurat_clusters_RNA', label=TRUE, reduction='umap_RNA') +
+NoLegend() + ggtitle('Gene-level clusters')
+p3 <- FeaturePlot(ONT_subset, features='nCount_iso', reduction='umap_iso')
+
+# assemble with patchwork
+p1 | p2 | p3
+```
+
+```{r RNA + ISO wnn integration}
+# switch back to genes assay
+DefaultAssay(ONT_subset) <- 'RNA'
+
+# run the WNN
+ONT_subset <- FindMultiModalNeighbors(
+  ONT_subset, dims.list = list(1:10, 1:10), reduction.list = list("pca", "pca_iso"), modality.weight.name = "RNA.weight")
+
+# UMAP and clustering, make sure to use the WNN output!
+ONT_subset <- RunUMAP(
+  ONT_subset,
+  nn.name = "weighted.nn",
+  reduction.name = "wnn.umap",
+  reduction.key = "wnnUMAP_"
+)
+ONT_subset <- FindClusters(
+  ONT_subset,
+  graph.name = "wsnn",
+  algorithm = 3,
+  resolution = 0.8,
+  verbose = FALSE
+)
+ONT_subset$seurat_clusters_wnn <- ONT_subset$seurat_clusters
+
+# plot clusters from each analysis on the respective UMAPs
+p4 <- DimPlot(ONT_subset, group.by = 'seurat_clusters_RNA', label=TRUE, reduction='umap_RNA') +
+   NoLegend() + ggtitle('Gene-level clusters')
+p5 <- DimPlot(ONT_subset, group.by = 'seurat_clusters_iso', label=TRUE, reduction='umap_iso') +
+   NoLegend() + ggtitle('Isoform-level clusters')
+p6 <- DimPlot(ONT_subset, group.by = 'seurat_clusters_wnn', label=TRUE, reduction='wnn.umap') +
+   NoLegend() + ggtitle('Gene + Isoform WNN')
+
+# assemble with patchwork
+p4 | p5 | p6
+```
+
+```{r Iso weight}
+# a side-by-side comparison of the three clustering analysis WNN outputs cell-specific modality weights that tell us about the relative information content of each cell for that modality.
+#close to 0 means most of the information would come from the isoform assay
+#close to 1 means most information would come from the gene assay
+#close to 0.5 means that both assays provide similar levels of information.
+p_weight <- VlnPlot(
+  ONT_subset,
+  features = "iso.weight",
+  group.by = 'seurat_clusters_wnn',
+  sort = TRUE,
+  pt.size=0) + 
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  geom_hline(yintercept=0.5, linetype='dashed', color='black') +
+  xlab('WNN clusters')
+
+p_weight
+```
+
+```{r RNA weight}
+VlnPlot(ONT_subset, features = "RNA.weight", group.by = 'seurat_clusters_RNA', sort = TRUE, pt.size=0) + NoLegend() +  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) + geom_hline(yintercept=0.5, linetype='dashed', color='black') 
+```
+
+```{r SingleR cell type prediction on gene level clusters}
+# cell type prediction using singleR annotation
+
+library(SingleR)
+library(celldex)
+library(tidyverse)
+library(pheatmap)
+
+# get reference data -----------
+ref <- celldex::HumanPrimaryCellAtlasData()
+View(as.data.frame(colData(ref)))
+
+# run SingleR (default mode) ---------
+# default for SingleR is to perform annotation of each individual cell
+
+ont_counts <- GetAssayData(ONT_subset, layer = 'counts')
+
+pred <- SingleR(test = ont_counts,
+        ref = ref,
+        labels = ref$label.fine)
+
+head(pred)
+
+ONT_subset$singleR.labels <- pred$labels[match(rownames(ONT_subset@meta.data), rownames(pred))]
+
+pred
+pred$scores
+
+plotScoreHeatmap(pred)
+
+# ...Based on deltas across cells ----------
+
+plotDeltaDistribution(pred)
+
+tab <- table(Assigned=pred$labels, Clusters=ONT_subset$seurat_clusters_RNA)
+pheatmap(log10(tab+10), color = colorRampPalette(c('white','blue'))(10))
+```
+
+```{r SingleR cell type prediction on iso level clusters}
+
+# default for SingleR is to perform annotation of each individual cell
+
+DefaultAssay(ONT_subset) <- "iso"
+
+ont_iso_counts <- GetAssayData(ONT_subset, layer = 'counts')
+
+pred_iso <- SingleR(test = ont_iso_counts,
+        ref = ref,
+        labels = ref$label.fine)
+
+head(pred_iso)
+
+ONT_subset$iso_singleR.labels <- pred_iso$labels[match(rownames(ONT_subset@meta.data), rownames(pred_iso))]
+
+pred_iso
+pred_iso$scores
+
+plotScoreHeatmap(pred_iso)
+
+# ...Based on deltas across cells ----------
+
+plotDeltaDistribution(pred_iso)
+
+tab_iso <- table(Assigned=pred_iso$labels, Clusters=ONT_subset$seurat_clusters_iso)
+
+pheatmap(log10(tab_iso+10), color = colorRampPalette(c('white','blue'))(10))
+
+```
+
+```{r Sctype cell type prediction on iso level clusters}
+#(citation:https://doi.org/10.1038/s41467-022-28803-w https://github.com/IanevskiAleksandr/sc-type )
+
+DefaultAssay(ONT_subset) <- "iso"
+
+library(openxlsx)
+
+lapply(c("dplyr","Seurat","HGNChelper"), library, character.only = T)
+
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+# DB file
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx"; tissue = "Immune system" # e.g. Immune 
+
+tissue <- "Immune system" 
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+# check Seurat object version (scRNA-seq matrix extracted differently in Seurat v4/v5)
+seurat_package_v5 <- isFALSE('counts' %in% names(attributes(ONT_subset[["iso"]])));
+print(sprintf("Seurat object %s is used", ifelse(seurat_package_v5, "v5", "v4")))
+
+# extract scaled scRNA-seq matrix
+scRNAseqData_scaled <- if (seurat_package_v5) as.matrix(ONT_subset[["iso"]]$scale.data) else as.matrix(ONT_subset[["iso"]]@scale.data)
+
+# get cell-type by cell matrix
+ont.es.max = sctype_score(scRNAseqData = scRNAseqData_scaled, scaled = TRUE, gs = gs_list$gs_positive, gs2 = gs_list$gs_negative)
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+ont_cL_resutls = do.call("rbind", lapply(unique(ONT_subset@meta.data$seurat_clusters_iso), function(cl){
+    es.max.cl = sort(rowSums(ont.es.max[ ,rownames(ONT_subset@meta.data[ONT_subset@meta.data$seurat_clusters_iso==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(ONT_subset@meta.data$seurat_clusters_iso==cl)), 10)
+}))
+ont_sctype_scores = ont_cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+ont_sctype_scores$type[as.numeric(as.character(ont_sctype_scores$scores)) < ont_sctype_scores$ncells/4] = "Unknown"
+print(ont_sctype_scores[,1:3])
+
+ONT_subset@meta.data$iso_sctype_predictions = ""
+for(j in unique(ont_sctype_scores$cluster)){
+  cl_type = ont_sctype_scores[ont_sctype_scores$cluster==j,]; 
+  ONT_subset@meta.data$iso_sctype_predictions[ONT_subset@meta.data$seurat_clusters_iso == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(ONT_subset, label = TRUE, repel = TRUE, group.by = 'iso_sctype_predictions', reduction = "umap_iso")
+View(ONT_subset@meta.data)
+```
+
+```{r Visualisation of sctype annotations}
+# load libraries
+lapply(c("ggraph","igraph","tidyverse", "data.tree"), library, character.only = T)
+
+# prepare edges
+ont_cL_resutls <- ont_cL_resutls[order(ont_cL_resutls$cluster),]; edges = ont_cL_resutls; edges$type = paste0(edges$type,"_",edges$cluster); edges$cluster = paste0("cluster ", edges$cluster); edges = edges[,c("cluster", "type")]; colnames(edges) = c("from", "to"); rownames(edges) <- NULL
+
+# prepare nodes
+nodes_lvl1_ont <- ont_sctype_scores[,c("cluster", "ncells")]; nodes_lvl1_ont$cluster = paste0("cluster ", nodes_lvl1_ont$cluster); nodes_lvl1_ont$Colour = "#f1f1ef"; nodes_lvl1_ont$ord = 1; nodes_lvl1_ont$realname = nodes_lvl1_ont$cluster; nodes_lvl1_ont = as.data.frame(nodes_lvl1_ont); nodes_lvl2_ont = c(); 
+ccolss <- c("#5f75ae","#92bbb8","#64a841","#e5486e","#de8e06","#eccf5a","#b5aa0f","#e4b680","#7ba39d","#b15928","#ffff99", "#6a3d9a","#cab2d6","#ff7f00","#fdbf6f","#e31a1c","#fb9a99","#33a02c","#b2df8a","#1f78b4","#a6cee3")
+
+for (i in 1:length(unique(ont_cL_resutls$cluster))){
+  dt_tmp = ont_cL_resutls[ont_cL_resutls$cluster == unique(ont_cL_resutls$cluster)[i], ]; nodes_lvl2_ont = rbind(nodes_lvl2_ont, data.frame(cluster = paste0(dt_tmp$type,"_",dt_tmp$cluster), ncells = dt_tmp$scores, Colour = ccolss[i], ord = 2, realname = dt_tmp$type))
+}
+
+nodes_ont <- rbind(nodes_lvl1_ont, nodes_lvl2_ont); nodes_ont$ncells[nodes_ont$ncells<1] = 1;
+
+files_db <- openxlsx::read.xlsx(db_)[,c("cellName","shortName")]; files_db = unique(files_db); nodes = merge(nodes_ont, files_db, all.x = T, all.y = F, by.x = "realname", by.y = "cellName", sort = F)
+
+nodes_ont$shortName[is.na(nodes_ont$shortName)] = nodes_ont$realname[is.na(nodes_ont$shortName)]; nodes_ont = nodes[,c("cluster", "ncells", "Colour", "ord", "shortName", "realname")]
+
+duplicated_nodes <- nodes_ont$cluster[duplicated(nodes_ont$cluster)]
+nodes_ont <- nodes_ont[!duplicated(nodes_ont$cluster), ]
+
+mygraph_ont <- graph_from_data_frame(edges, vertices=nodes_ont)
+
+# Make the graph
+gggr_ont <- ggraph(mygraph_ont, layout = 'circlepack', weight=I(ncells)) + 
+  geom_node_circle(aes(filter=ord==1,fill=I("#F5F5F5"), colour=I("#D3D3D3")), alpha=0.9) + geom_node_circle(aes(filter=ord==2,fill=I(Colour), colour=I("#D3D3D3")), alpha=0.9) +
+  theme_void() + geom_node_text(aes(filter=ord==2, label=shortName, colour=I("#ffffff"), fill="white", repel = !1, parse = T, size = I(log(ncells,25)*1.5)))+ geom_node_label(aes(filter=ord==1,  label=shortName, colour=I("#000000"), size = I(3), fill="white", parse = T), repel = !0, segment.linetype="dotted") + NoLegend()
+  
+library(gridExtra)
+
+# Your existing code for DimPlot
+dim_plot_ont <- DimPlot(ONT_subset, reduction = "umap_RNA", label = TRUE, repel = TRUE, cols = ccolss)
+
+# Arrange the plots using grid.arrange
+grid.arrange(dim_plot_ont, gggr_ont, ncol = 2)
+```
+
+```{r Assigning final cell type annotations to cells based on markers and predictions}
+# Adding final publication annotations for seurat obj on combined gene and iso cluster level
+
+# Manual cell type annotations were assigned based on a combination of approaches, including:
+# - Differential expression analysis from FindAllMarkers() (cross-checking marker expression)
+# - Predictions from scType and SingleR 
+# The cluster numbers assigned here are specific to this analysis and may differ when re-running 
+# on a different dataset or with different clustering parameters. Therefore, users should always 
+# cross-check marker expression before applying annotations.
+
+manual_ont_idents <- c("T cells Naive CD4+", 
+                       "T cells Effector CD4+",
+                       "NKT-like cells CD8+", 
+                       "B cells", 
+                       "Monocytes CD16-",
+                       "NK cells", 
+                       "T cells Naive CD8+", 
+                       "T cells Naive CD4+", 
+                       "γδ-T cells", 
+                       "Monocytes CD16+", 
+                       "Dendritic cells")
+
+names(manual_ont_idents) <- levels(ONT_subset)
+ONT_subset <- RenameIdents(ONT_subset, manual_ont_idents)
+
+DimPlot(ONT_subset, label = TRUE, pt.size = 0.5, reduction = "wnn.umap") + NoLegend()
+
+ONT_subset@meta.data$manual_annotation <- Idents(ONT_subset)
+```
+
+```{r Sankey}
+library(ggsankey)
+
+df_ont <- ONT_subset@meta.data %>% 
+  ggsankey::make_long(seurat_clusters_RNA, manual_annotation, seurat_clusters_iso)
+  
+Sankey <- ggplot(df_ont, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(node),
+               label = node)) +
+  geom_sankey() +
+  geom_sankey_label(size=4) +
+  theme_sankey(base_size = 16) + NoLegend() +
+  scale_x_discrete(labels=c(
+    'seurat_clusters_RNA' = 'Genes',
+    'manual_annotation' = 'WNN',
+    'seurat_clusters_iso' = 'Isoforms'
+    )) + ggtitle('ONT')
+
+Sankey
+```
+
+```{r Adding illumina cell type annots to ont sobj}
+# This step integrates the cell type annotations stored in @meta.data from the Illumina scRNAseq object (same sample). Cell barcodes common to both objects are identified, and cell type labels from the Illumina object are added to the ONT_subset @meta.data under $illumina_annotation.
+
+# To do this, you must first load the Illumina Seurat object. Ensure that the file `illumina_analysed_sobj.rds` is located in the `data/illumina/` directory.
+
+# Load Illumina Seurat object
+illumina <- readRDS("data/illumina/illumina_analysed_sobj.rds") 
+
+illumina_meta <- illumina@meta.data
+ont_meta <- ONT_subset@meta.data
+
+# Perform a left join to add the "manual_annotation" from illumina to ont_subset
+library(dplyr)
+
+# Check intersect 
+common_barcodes_ont_illumina <- intersect(ONT_subset$barcode, illumina_meta$barcode)
+length(common_barcodes_rev_illumina)  # Should return the number of matching barcodes = 4185
+
+# Ensure the barcodes are rownames 
+#illumina_meta$barcode <- rownames(illumina_meta)
+#ont_meta$barcode <- rownames(ont_meta)
+
+# Join metadata
+ont_meta <- ont_meta %>%
+  left_join(
+    illumina_meta %>% select(barcode, manual_annotation), # Select relevant columns from illumina
+    by = "barcode" # Match based on the barcode
+  ) %>%
+  rename(illumina_annotation = manual_annotation) # Rename the column to "illumina_annotation"
+
+# Update the ont_subset Seurat object metadata
+ONT_subset@meta.data <- ont_meta
+DefaultAssay(ONT_subset) <-  "RNA"
+```
+
+```{r TRUST4 - add to meta data}
+# Input files:
+# These files contain barcode information for different immune cell types (B cells, αβ T cells, γδ T cells) as reconstructed by TRUST4 from Nanopore sequencing data.
+# They should be located within the `Ig_reconstruction_TRUST4/nanopore_TRUST4/` directory.
+
+# Define the directory path (modify if needed, but keep relative)
+trust4_dir <- "~/Ig_reconstruction_TRUST4/nanopore_TRUST4/"
+
+# Read in TRUST4 barcode files
+ont_abT <- read.delim(file.path(trust4_dir, "sample1B_ONT_defaultsettings_abTbarcodes.txt"), col.names = "barcode")
+ont_B <- read.delim(file.path(trust4_dir, "sample1B_ONT_defaultsettings_Bbarcodes.txt"), col.names = "barcode")
+ont_gdT <- read.delim(file.path(trust4_dir, "sample1B_ONT_defaultsettings_gdTbarcodes.txt"), col.names = "barcode")
+
+ont_metadata <- ONT_subset@meta.data
+
+# Find matching row names for each cell type
+matching_row_names <- rownames(ont_metadata)[rownames(ont_metadata) %in% ont_abT$barcode]
+matching_row_names_B <- rownames(ont_metadata)[rownames(ont_metadata) %in% ont_B$barcode]
+matching_row_names_G <- rownames(ont_metadata)[rownames(ont_metadata) %in% ont_gdT$barcode]
+
+# Initialize TRUST4 column in meta.data with NA
+ont_metadata$TRUST4 <- NA  
+
+# Get the matching row indices
+matching_ont_abT_indices <- which(rownames(ont_metadata) %in% ont_abT$barcode)
+matching_ont_B_indices <- which(rownames(ont_metadata) %in% ont_B$barcode)
+matching_ont_gdT_indices <- which(rownames(ont_metadata) %in% ont_gdT$barcode)
+
+# Update meta.data$TRUST4 - Assign TRUST4 annotations based on matching barcodes
+ont_metadata$TRUST4[matching_ont_abT_indices] <- "TCRab"
+ont_metadata$TRUST4[matching_ont_B_indices] <- "B"
+ont_metadata$TRUST4[matching_ont_gdT_indices] <- "TCRgd"
+
+# Replace meta.data of sobj
+ONT_subset@meta.data <- ont_metadata
+DimPlot(ONT_subset, group.by = "TRUST4", reduction = "wnn.umap")
+
+
+# Information about TRUST4 run for context only:
+# - This reports the total number of barcodes and missing chain info
+
+#a total of 398 [0.133] are missing chain 1 info, split by: B cells (105 [0.264]), abT cells (273 [0.686]) and gdT cells (20 [0.05])
+#a total of 1478 [0.495] are missing chain 2 info, split by: B cells (30 [0.02]), abT cells (1431 [0.968]) and gdT cells (17 [0.012])
+#a total of 1111 [0.372] have both chains present, split by: B cells (432 [0.389]), abT cells (634 [0.571]) and gdT cells (45 [0.041])
+
+#there are 567 B cell barcodes in total in the file
+#there are 2338 abT cell barcodes in total in the file
+#there are 82 gdT cell barcodes in total in the file
+```
+
+

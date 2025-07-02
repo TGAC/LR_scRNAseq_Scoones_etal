@@ -1,0 +1,1083 @@
+---
+title: "MAS_sequel_analysis"
+author: "Anita Ahlert Scoones, Macaulay Group, Earlham Institute"
+date: "2025-03-12"
+---
+
+# Sequel scRNA-seq Data Processing Script
+
+# This script loads Feature Barcode Matrices for two Sequel samples, including MAS-seq and Jumpcode data.
+# It also loads the final processed Seurat objects for MAS-seq and Jumpcode.
+
+# Expected Folder Structure:
+# seurat_data/
+# ├── sequel/
+# │   ├── MASseq/
+# │   │   ├── sample1/
+# │   │   │   ├── genes_seurat
+# │   │   │   ├── isoforms_seurat
+# │   │   ├── sample2/
+# │   │   │   ├── genes_seurat
+# │   │   │   ├── isoforms_seurat
+# │   │   ├── sequel_MASseq_analysed_sobj.rds  <-- (Final processed Seurat object for MAS-seq)
+# │   ├── Jumpcode/
+# │   │   ├── sample1/
+# │   │   │   ├── genes_seurat
+# │   │   │   ├── isoforms_seurat
+# │   │   ├── sample2/
+# │   │   │   ├── genes_seurat
+# │   │   │   ├── isoforms_seurat
+# │   │   ├── sequel_Jumpcode_analysed_sobj.rds  <-- (Final processed Seurat object for Jumpcode)
+
+# Ensure you have downloaded the dataset and placed it in the `seurat_data/` directory.
+
+```{r Library loading}
+#library loading
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+library(tidyverse)
+library(patchwork)
+library(harmony)
+library(viridis)
+```
+
+```{r 1 Designate data directories}
+rm(list=ls())
+
+# Define base directory where "data" is stored (assume user downloads it)
+base_dir <- "data/sequel"
+
+# Sample 1 Paths
+seq_genes_1 <- file.path(base_dir, "MASseq/sample1/genes_seurat")
+seq_iso_1 <- file.path(base_dir, "MASseq/sample1/isoforms_seurat")
+
+seq_genes_JC_1 <- file.path(base_dir, "Jumpcode/sample1/genes_seurat")
+seq_iso_JC_1 <- file.path(base_dir, "Jumpcode/sample1/isoforms_seurat")
+
+# Sample 2 Paths
+seq_genes_2 <- file.path(base_dir, "MASseq/sample2/genes_seurat")
+seq_iso_2 <- file.path(base_dir, "MASseq/sample2/isoforms_seurat")
+
+seq_genes_JC_2 <- file.path(base_dir, "Jumpcode/sample2/genes_seurat")
+seq_iso_JC_2 <- file.path(base_dir, "Jumpcode/sample2/isoforms_seurat")
+```
+
+```{r 2 Import 10X data}
+# load data matrices
+iso_list <- c(iso_1, iso_2, iso_JC_1, iso_JC_2)
+gene_list <- c(genes_1, genes_2, genes_JC_1, genes_JC_2)
+
+gene_X_list <- lapply(gene_list, function(x){Seurat::Read10X(x)})
+iso_X_list <- lapply(iso_list, function(x){Seurat::Read10X(x)})
+```
+
+```{r 3 Creating seurat objects, adding meta data: MT, sample ID, library type}
+seurat_1 <- CreateSeuratObject(gene_X_list[[1]], min.cells = 5)
+seurat_1_JC <- CreateSeuratObject(gene_X_list[[3]], min.cells = 5)
+seurat_2 <- CreateSeuratObject(gene_X_list[[2]], min.cells = 5)
+seurat_2_JC <- CreateSeuratObject(gene_X_list[[4]], min.cells = 5)
+
+seurat_1$barcode <- colnames(seurat_1)
+seurat_1_JC$barcode <- colnames(seurat_1_JC)
+seurat_2$barcode <- colnames(seurat_2)
+seurat_2_JC$barcode <- colnames(seurat_2_JC)
+
+seurat_1[["percent.mt"]] <- PercentageFeatureSet(seurat_1, pattern = "^MT-")
+seurat_1_JC[["percent.mt"]] <- PercentageFeatureSet(seurat_1_JC, pattern = "^MT-")
+seurat_2[["percent.mt"]] <- PercentageFeatureSet(seurat_2, pattern = "^MT-")
+seurat_2_JC[["percent.mt"]] <- PercentageFeatureSet(seurat_2_JC, pattern = "^MT-")
+
+seurat_1$sample <- "sample1"
+seurat_1_JC$sample <- "sample1"
+seurat_2$sample <- "sample2"
+seurat_2_JC$sample <- "sample2"
+
+seurat_1$library_type <- "Sequel_MAS"
+seurat_1_JC$library_type <- "Sequel_MAS_JC"
+seurat_2$library_type <- "Sequel_MAS"
+seurat_2_JC$library_type <- "Sequel_MAS_JC"
+
+seurat_1[["iso"]] <- Seurat::CreateAssayObject(counts = iso_X_list[[1]], min.cells=5)
+seurat_1_JC[["iso"]] <- Seurat::CreateAssayObject(counts = iso_X_list[[3]], min.cells=5)
+seurat_2[["iso"]] <- Seurat::CreateAssayObject(counts = iso_X_list[[2]], min.cells=5)
+seurat_2_JC[["iso"]] <-Seurat::CreateAssayObject(counts = iso_X_list[[4]], min.cells=5)
+
+# Function to add suffix based on 'type' column in meta.data
+add_suffix_based_on_type <- function(seurat_obj) {
+   # Get the 'type' column from meta.data
+ type_column <- seurat_obj@meta.data$library_type
+  
+# Check the 'type' column and modify colnames accordingly
+  if ("Sequel_MAS" %in% type_column) {
+    colnames(seurat_obj) <- paste0(colnames(seurat_obj), "_MAS")
+  } else if ("Sequel_MAS_JC" %in% type_column) {
+    colnames(seurat_obj) <- paste0(colnames(seurat_obj), "_MAS_JC")
+  }
+  
+  return(seurat_obj)
+}
+
+# Apply the function to your Seurat objects
+seurat_1 <- add_suffix_based_on_type(seurat_1)
+seurat_1_JC <- add_suffix_based_on_type(seurat_1_JC)
+seurat_2 <- add_suffix_based_on_type(seurat_2)
+seurat_2_JC <- add_suffix_based_on_type(seurat_2_JC)
+
+#Cell Numbers: 1 = 4773, 1_JC = 4777, 2 = 7298, 2_JC = 7170)
+seurat_list <- c(seurat_1, seurat_1_JC, seurat_2, seurat_2_JC)
+```
+
+```{r 4.1 pre-QC stats sample1}
+# Sample 1 & 1_JC
+
+#Genes count Level 
+mean(seurat_list[[1]]@meta.data$nCount_RNA) #1966
+range(seurat_list[[1]]@meta.data$nCount_RNA) #231-14271
+
+mean(seurat_list[[2]]@meta.data$nCount_RNA) #1344
+range(seurat_list[[2]]@meta.data$nCount_RNA) #204-13826
+
+#Iso count Level
+mean(seurat_list[[1]]@meta.data$nCount_iso) #1883
+range(seurat_list[[1]]@meta.data$nCount_iso) #210-13705
+
+mean(seurat_list[[2]]@meta.data$nCount_iso) #1232
+range(seurat_list[[2]]@meta.data$nCount_iso) #160-12810
+
+
+#Features level
+mean(seurat_list[[1]]@meta.data$nFeature_RNA) #689 genes
+range(seurat_list[[1]]@meta.data$nFeature_RNA) #110-3507 
+
+mean(seurat_list[[2]]@meta.data$nFeature_RNA) #922 genes
+range(seurat_list[[2]]@meta.data$nFeature_RNA) #168-4791
+
+#Iso level
+
+mean(seurat_list[[1]]@meta.data$nFeature_iso) #728 isoforms
+range(seurat_list[[1]]@meta.data$nFeature_iso) #103-4604
+
+mean(seurat_list[[2]]@meta.data$nFeature_iso) #947 isoforms
+range(seurat_list[[2]]@meta.data$nFeature_iso) #145-6897
+```
+
+```{r 4.2 pre-QC stats sample1}
+# Sample 2 vs 2_JC
+
+#Genes count Level 
+mean(seurat_list[[3]]@meta.data$nCount_RNA) #1455
+range(seurat_list[[3]]@meta.data$nCount_RNA) #151 9756
+
+mean(seurat_list[[4]]@meta.data$nCount_RNA) #1327
+range(seurat_list[[4]]@meta.data$nCount_RNA) #159-10691
+
+#Iso count Level
+mean(seurat_list[[3]]@meta.data$nCount_iso) #1403
+range(seurat_list[[3]]@meta.data$nCount_iso) #137-9459
+
+mean(seurat_list[[4]]@meta.data$nCount_iso) #1248
+range(seurat_list[[4]]@meta.data$nCount_iso) #129-10284
+
+
+#Features level
+mean(seurat_list[[3]]@meta.data$nFeature_RNA) #594 genes
+range(seurat_list[[3]]@meta.data$nFeature_RNA) #81-2760 
+
+mean(seurat_list[[4]]@meta.data$nFeature_RNA) #910 genes
+range(seurat_list[[4]]@meta.data$nFeature_RNA) #9-4186
+
+#Iso level
+
+mean(seurat_list[[3]]@meta.data$nFeature_iso) #637 isoforms
+range(seurat_list[[3]]@meta.data$nFeature_iso) #73-3500
+
+mean(seurat_list[[4]]@meta.data$nFeature_iso) #961 isoforms
+range(seurat_list[[4]]@meta.data$nFeature_iso) #6-5715
+```
+
+```{r 5a Pre-integration merge sobj (visualisation only)}
+# merge replicates into one Seurat object (pre-integration)
+merged_MAS <- Reduce(merge, c(seurat_1, seurat_2)) #12071 cells
+
+merged_JC <- Reduce(merge, c(seurat_1_JC, seurat_2_JC)) # 11947 cells
+```
+
+```{r 5b Visualising QC metrics pre-QC}
+# violin plots for different QC stats
+features <- c('nCount_RNA', 'nFeature_RNA', 'nCount_iso', 'nFeature_iso', 'percent.mt')
+
+# make a violin plot for each QC metric
+raw_MAS_QC <- lapply(features, function(x){ VlnPlot(
+  merged_MAS,
+  features = x,
+  group.by = 'sample',
+  pt.size=0) +
+  RotatedAxis() +
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  xlab('') +
+  theme(plot.title = element_text(size=10, hjust=0.5))
+})
+
+# make a violin plot for each QC metric
+raw_JC_QC <- lapply(features, function(x){ VlnPlot(
+  merged_JC,
+  features = x,
+  group.by = 'sample',
+  pt.size=0) +
+  RotatedAxis() +
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  xlab('') +
+  theme(plot.title = element_text(size=10, hjust=0.5))
+})
+
+# assemble plots with patchwork
+wrap_plots(raw_MAS_QC, ncol= 5)
+wrap_plots(raw_JC_QC, ncol = 5)
+```
+
+```{r 6 Subsetting QC}
+#quantiles
+# Define a function to calculate lb and ub, and filter the Seurat object
+filter_seurat <- function(seurat_obj) {
+  lb <- quantile(seurat_obj[["nFeature_RNA"]]$nFeature_RNA, probs = 0.10)
+  ub <- quantile(seurat_obj[["nFeature_RNA"]]$nFeature_RNA, probs = 0.99)
+  
+  subsetted_seurat <- seurat_obj[, seurat_obj[["nFeature_RNA"]] > lb & seurat_obj[["nFeature_RNA"]] < ub & seurat_obj[["percent.mt"]] < 15]
+  
+  return(subsetted_seurat)
+}
+
+# Apply the function to each Seurat object
+seurat_1_subset <- filter_seurat(seurat_1) # 4773 > 4212
+seurat_1_JC_subset <- filter_seurat(seurat_1_JC) # 4777 > 4249
+seurat_2_subset <- filter_seurat(seurat_2) # 7298 > 6493
+seurat_2_JC_subset <- filter_seurat(seurat_2_JC) # 7170 > 6375
+
+# merge replicates into one Seurat object (pre-integration)
+merged_MAS <- Reduce(merge, c(seurat_1_subset, seurat_2_subset)) #10705
+
+merged_JC <- Reduce(merge, c(seurat_1_JC_subset, seurat_2_JC_subset))#10624
+```
+
+```{r 7 Visualising QC metrics post QC}
+# make a violin plot for each QC metric
+filtered_MAS_QC <- lapply(features, function(x){ VlnPlot(
+  merged_MAS,
+  features = x,
+  group.by = 'sample',
+  pt.size=0) +
+  RotatedAxis() +
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  xlab('') +
+  theme(plot.title = element_text(size=10, hjust=0.5))
+})
+
+# make a violin plot for each QC metric
+filtered_JC_QC <- lapply(features, function(x){ VlnPlot(
+  merged_JC,
+  features = x,
+  group.by = 'sample',
+  pt.size=0) +
+  RotatedAxis() +
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  xlab('') +
+  theme(plot.title = element_text(size=10, hjust=0.5))
+})
+
+# assemble plots with patchwork
+wrap_plots(filtered_MAS_QC, ncol= 5)
+wrap_plots(filtered_JC_QC, ncol = 5)
+```
+
+```{r 8 Gene Level; sobj normalisation, var.feat, scaling, pca}
+#pre-processing 
+preprocessSeuratObject <- function(obj, pca_reduction_name = 'pca') {
+  obj <- NormalizeData(obj)
+  obj <- FindVariableFeatures(obj)
+  obj <- ScaleData(obj)
+  obj <- RunPCA(obj, reduction.name = pca_reduction_name)
+  
+  return(obj)
+}
+
+MAS_processed <- merged_MAS %>% preprocessSeuratObject()
+
+JC_processed <- merged_JC %>% preprocessSeuratObject()
+```
+
+```{r 9 Integrate layers - cca; sample integration (sample 1 and 2) - NOTE: PacBio only}
+# After preprocessing, we integrate layers.
+MAS_integrated <- IntegrateLayers(object = MAS_processed, method = CCAIntegration,
+  orig.reduction = "pca", new.reduction = "integrated.cca",
+  verbose = FALSE)
+
+JC_integrated <- IntegrateLayers(object = JC_processed, method = CCAIntegration,
+  orig.reduction = "pca", new.reduction = "integrated.cca",
+  verbose = FALSE)
+```
+
+```{r 10 Gene Level; Clustering}
+# clustering on gene level 
+perform_clustering <- function(seurat_obj) {
+  # Run UMAP
+  seurat_obj <- RunUMAP(seurat_obj, reduction.name = 'umap', reduction = 'integrated.cca', dims = 1:30, min.dist=0.3)
+  
+  # Find neighbors and clusters on the UMAP space
+  seurat_obj <- FindNeighbors(object = seurat_obj, dims = 1:30)
+  seurat_obj <- FindClusters(seurat_obj, resolution = 0.8)
+  
+  return(seurat_obj)
+}
+
+MAS_analysis <- MAS_integrated %>% perform_clustering()
+JC_analysis <- JC_integrated %>% perform_clustering()
+```
+
+```{r 11 Plotting clusters & storing RNA lvl clusters}
+DefaultAssay(MAS_analysis) <- 'RNA'
+DefaultAssay(JC_analysis) <- 'RNA'
+DimPlot(MAS_analysis, split.by = "sample")
+DimPlot(JC_analysis, split.by = "sample")
+ 
+# RNA lvl clusters 
+MAS_analysis$seurat_clusters_RNA <- MAS_analysis$seurat_clusters
+JC_analysis$seurat_clusters_RNA <- JC_analysis$seurat_clusters
+```
+
+```{r FindMarkers RNA}
+MAS.RNA.markers <- FindAllMarkers(MAS_analysis, only.pos = TRUE)
+MAS.RNA.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+
+JC.RNA.markers <- FindAllMarkers(JC_analysis, only.pos = TRUE)
+JC.RNA.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+```
+
+```{r 12 Cell type prediction - RNA lvl - MAS & JC - scType https://github.com/IanevskiAleksandr/sc-type}
+
+library(openxlsx)
+lapply(c("dplyr","Seurat","HGNChelper"), library, character.only = T)
+
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+
+# DB file
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx"; tissue = "Immune system" # e.g. Immune 
+
+tissue <- "Immune system" 
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+# MAS annotation 
+
+# check Seurat object version (scRNA-seq matrix extracted differently in Seurat v4/v5)
+seurat_package_v5 <- isFALSE('counts' %in% names(attributes(MAS_analysis[["RNA"]])));
+print(sprintf("Seurat object %s is used", ifelse(seurat_package_v5, "v5", "v4")))
+
+# extract scaled scRNA-seq matrix
+scRNAseqData_scaled <- if (seurat_package_v5) as.matrix(MAS_analysis[["RNA"]]$scale.data) else as.matrix(MAS_analysis[["RNA"]]@scale.data)
+
+# get cell-type by cell matrix
+sequel.es.max = sctype_score(scRNAseqData = scRNAseqData_scaled, scaled = TRUE, gs = gs_list$gs_positive, gs2 = gs_list$gs_negative)
+
+# merge by cluster
+sequel_cL_resutls = do.call("rbind", lapply(unique(MAS_analysis@meta.data$seurat_clusters_RNA), function(cl){
+    es.max.cl = sort(rowSums(sequel.es.max[ ,rownames(MAS_analysis@meta.data[MAS_analysis@meta.data$seurat_clusters_RNA==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(MAS_analysis@meta.data$seurat_clusters_RNA==cl)), 10)
+}))
+
+sequel_sctype_scores = sequel_cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sequel_sctype_scores$type[as.numeric(as.character(sequel_sctype_scores$scores)) < sequel_sctype_scores$ncells/4] = "Unknown"
+print(sequel_sctype_scores[,1:3])
+
+MAS_analysis@meta.data$sctype_RNA_prediction = ""
+for(j in unique(sequel_sctype_scores$cluster)){
+  cl_type = sequel_sctype_scores[sequel_sctype_scores$cluster==j,]; 
+  MAS_analysis@meta.data$sctype_RNA_prediction[MAS_analysis@meta.data$seurat_clusters_RNA == j] = as.character(cl_type$type[1])
+}
+
+
+#------JC
+
+
+# check Seurat object version (scRNA-seq matrix extracted differently in Seurat v4/v5)
+seurat_package_v5 <- isFALSE('counts' %in% names(attributes(JC_analysis[["RNA"]])));
+print(sprintf("Seurat object %s is used", ifelse(seurat_package_v5, "v5", "v4")))
+
+# extract scaled scRNA-seq matrix
+scRNAseqData_scaled <- if (seurat_package_v5) as.matrix(JC_analysis[["RNA"]]$scale.data) else as.matrix(sequel_jc_sobj[["RNA"]]@scale.data)
+
+# get cell-type by cell matrix
+sequel.es.max = sctype_score(scRNAseqData = scRNAseqData_scaled, scaled = TRUE, gs = gs_list$gs_positive, gs2 = gs_list$gs_negative)
+
+# merge by cluster
+sequel_cL_resutls = do.call("rbind", lapply(unique(JC_analysis@meta.data$seurat_clusters_RNA), function(cl){
+    es.max.cl = sort(rowSums(sequel.es.max[ ,rownames(JC_analysis@meta.data[JC_analysis@meta.data$seurat_clusters_RNA==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(JC_analysis@meta.data$seurat_clusters_RNA==cl)), 10)
+}))
+
+sequel_sctype_scores = sequel_cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sequel_sctype_scores$type[as.numeric(as.character(sequel_sctype_scores$scores)) < sequel_sctype_scores$ncells/4] = "Unknown"
+print(sequel_sctype_scores[,1:3])
+
+JC_analysis@meta.data$sctype_RNA_prediction = ""
+for(j in unique(sequel_sctype_scores$cluster)){
+  cl_type = sequel_sctype_scores[sequel_sctype_scores$cluster==j,]; 
+  JC_analysis@meta.data$sctype_RNA_prediction[JC_analysis@meta.data$seurat_clusters_RNA == j] = as.character(cl_type$type[1])
+}
+
+#plot gene level annotation of MAS data 
+DimPlot(MAS_analysis, label = TRUE, repel = TRUE, group.by = 'sctype_RNA_prediction', reduction = "umap")
+DimPlot(JC_analysis, label = TRUE, repel = TRUE, group.by = 'sctype_RNA_prediction', reduction = "umap")  
+``` 
+
+```{r 13.1 MAS Isoform Level; sobj normalisation, var.feat, scaling, pca}
+DefaultAssay(MAS_analysis) <- 'iso'
+
+library(harmony)
+library(patchwork)
+
+# log normalize data
+MAS_analysis <- NormalizeData(MAS_analysis)
+
+# Split the Seurat object by 'Sample' (each sample is a replicate)
+split_objects <- SplitObject(MAS_analysis, split.by = "sample")
+
+# Find variable features for each replicate
+selected_features <- lapply(split_objects, function(x) {
+  FindVariableFeatures(x, nfeatures = 20000) %>% VariableFeatures
+})
+
+# Take the intersection of variable features across all samples
+VariableFeatures(MAS_analysis) <- Reduce(intersect, selected_features)
+
+# scale data and run PCA
+MAS_analysis <- MAS_analysis %>%
+  ScaleData() %>%
+  RunPCA(reduction.name='pca_iso')
+```
+
+```{r 14.1 MAS Iso level integration - Harmony}
+# run harmony
+MAS_analysis <- RunHarmony(
+  MAS_analysis,
+  group.by.vars = 'sample',
+  reduction='pca_iso',
+  assay.use = 'iso',
+  reduction.save = 'harmony_iso'
+)
+```
+
+```{r 15.1 MAS Isoform Level; Clustering}
+# run umap
+MAS_analysis <- RunUMAP(
+  MAS_analysis,
+  dims=1:10,
+  reduction='harmony_iso',
+  reduction.name='umap_iso'
+)
+
+# clustering
+MAS_analysis <- FindNeighbors(
+  MAS_analysis, dims = 1:10,
+  reduction='harmony_iso', graph.name = c('iso_sn', 'iso_snn')
+)
+
+MAS_analysis <- FindClusters(MAS_analysis, resolution = 0.8, graph.name='iso_snn')
+
+MAS_analysis$seurat_clusters_iso <- MAS_analysis$seurat_clusters
+
+DimPlot(MAS_analysis, reduction = "umap", group.by = "sample") 
+DimPlot(MAS_analysis, reduction = "umap_iso", group.by = "sample") 
+```
+
+```{r 13.2 MAS with JC Isoform Level; sobj normalisation, var.feat, scaling, pca (same as for MAS only data)}
+# switch to the isoform assay 
+DefaultAssay(JC_analysis) <- 'iso'
+DefaultAssay(JC_analysis)
+
+# log normalize data
+JC_analysis <- NormalizeData(JC_analysis)
+
+# Split the Seurat object by 'Sample' (each sample is a replicate)
+split_objects <- SplitObject(JC_analysis, split.by = "sample")
+
+# Find variable features for each replicate
+selected_features <- lapply(split_objects, function(x) {
+  FindVariableFeatures(x, nfeatures = 20000) %>% VariableFeatures
+})
+
+# Take the intersection of variable features across all samples
+VariableFeatures(JC_analysis) <- Reduce(intersect, selected_features)
+
+# scale data and run PCA
+JC_analysis <- JC_analysis %>%
+  ScaleData() %>%
+  RunPCA(reduction.name='pca_iso')
+```
+
+```{r 14.2 MAS with JC Iso level integration - Harmony (same as for MAS only data)}
+# run harmony
+JC_analysis <- RunHarmony(
+  JC_analysis,
+  group.by.vars = 'sample',
+  reduction='pca_iso',
+  assay.use = 'iso',
+  reduction.save = 'harmony_iso'
+)
+```
+
+```{r 15.2 MAS with JC Isoform Level; Clustering (same as for MAS only data)}
+# run umap
+JC_analysis <- RunUMAP(
+  JC_analysis,
+  dims=1:10,
+  reduction='harmony_iso',
+  reduction.name='umap_iso'
+)
+
+# clustering
+JC_analysis <- FindNeighbors(
+  JC_analysis, dims = 1:10,
+  reduction='harmony_iso', graph.name = c('iso_sn', 'iso_snn')
+)
+
+JC_analysis <- FindClusters(JC_analysis, resolution = 0.8, graph.name='iso_snn')
+
+JC_analysis$seurat_clusters_iso <- JC_analysis$seurat_clusters
+
+DimPlot(JC_analysis, reduction = "umap", group.by = "sample") | DimPlot(JC_analysis, reduction = "umap_iso", group.by = "sample") 
+```
+
+```{r 16 Cell type prediction - iso lvl - MAS & JC - scType}
+#MAS 
+DefaultAssay(MAS_analysis) <- "iso"
+
+# check Seurat object version (scRNA-seq matrix extracted differently in Seurat v4/v5)
+seurat_package_v5 <- isFALSE('counts' %in% names(attributes(MAS_analysis[["iso"]])));
+print(sprintf("Seurat object %s is used", ifelse(seurat_package_v5, "v5", "v4")))
+
+# extract scaled scRNA-seq matrix
+scRNAseqData_scaled <- if (seurat_package_v5) as.matrix(MAS_analysis[["iso"]]$scale.data) else as.matrix(MAS_analysis[["iso"]]@scale.data)
+
+# get cell-type by cell matrix
+sequel.es.max = sctype_score(scRNAseqData = scRNAseqData_scaled, scaled = TRUE, gs = gs_list$gs_positive, gs2 = gs_list$gs_negative)
+
+# merge by cluster
+sequel_cL_resutls = do.call("rbind", lapply(unique(MAS_analysis@meta.data$seurat_clusters_iso), function(cl){
+    es.max.cl = sort(rowSums(sequel.es.max[ ,rownames(MAS_analysis@meta.data[MAS_analysis@meta.data$seurat_clusters_iso==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(MAS_analysis@meta.data$seurat_clusters_iso==cl)), 10)
+}))
+
+sequel_sctype_scores = sequel_cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sequel_sctype_scores$type[as.numeric(as.character(sequel_sctype_scores$scores)) < sequel_sctype_scores$ncells/4] = "Unknown"
+print(sequel_sctype_scores[,1:3])
+
+MAS_analysis@meta.data$sctype_iso_prediction = ""
+
+for(j in unique(sequel_sctype_scores$cluster)){
+  cl_type = sequel_sctype_scores[sequel_sctype_scores$cluster==j,]; 
+  MAS_analysis@meta.data$sctype_iso_prediction[MAS_analysis@meta.data$seurat_clusters_iso == j] = as.character(cl_type$type[1])
+}
+
+#-----JC
+
+DefaultAssay(JC_analysis) <- "iso"
+DefaultAssay(JC_analysis)
+
+# check Seurat object version (scRNA-seq matrix extracted differently in Seurat v4/v5)
+seurat_package_v5 <- isFALSE('counts' %in% names(attributes(JC_analysis[["iso"]])));
+print(sprintf("Seurat object %s is used", ifelse(seurat_package_v5, "v5", "v4")))
+
+# extract scaled scRNA-seq matrix
+scRNAseqData_scaled <- if (seurat_package_v5) as.matrix(JC_analysis[["iso"]]$scale.data) else as.matrix(JC_analysis[["iso"]]@scale.data)
+
+# get cell-type by cell matrix
+sequel.es.max = sctype_score(scRNAseqData = scRNAseqData_scaled, scaled = TRUE, gs = gs_list$gs_positive, gs2 = gs_list$gs_negative)
+
+# merge by cluster
+sequel_cL_resutls = do.call("rbind", lapply(unique(JC_analysis@meta.data$seurat_clusters_iso), function(cl){
+    es.max.cl = sort(rowSums(sequel.es.max[ ,rownames(JC_analysis@meta.data[JC_analysis@meta.data$seurat_clusters_iso==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(JC_analysis@meta.data$seurat_clusters_iso==cl)), 10)
+}))
+
+sequel_sctype_scores = sequel_cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sequel_sctype_scores$type[as.numeric(as.character(sequel_sctype_scores$scores)) < sequel_sctype_scores$ncells/4] = "Unknown"
+print(sequel_sctype_scores[,1:3])
+
+JC_analysis@meta.data$sctype_iso_prediction = ""
+for(j in unique(sequel_sctype_scores$cluster)){
+  cl_type = sequel_sctype_scores[sequel_sctype_scores$cluster==j,]; 
+  JC_analysis@meta.data$sctype_iso_prediction[JC_analysis@meta.data$seurat_clusters_iso == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(MAS_analysis, label = TRUE, repel = TRUE, group.by = 'sctype_iso_prediction', reduction = "umap_iso")
+DimPlot(JC_analysis, label = TRUE, repel = TRUE, group.by = 'sctype_iso_prediction', reduction = "umap_iso")
+```
+
+```{r 17 Cell type prediction - iso lvl - MAS & JC - SingleR}
+
+library(SingleR)
+library(celldex)
+library(tidyverse)
+library(pheatmap)
+
+# 0. Set up reference data -----------
+ref <- celldex::HumanPrimaryCellAtlasData()
+View(as.data.frame(colData(ref)))
+
+#----- MAS 
+
+# 1. Check iso is default assay
+DefaultAssay(MAS_analysis) <- 'iso'
+
+# 2. Extract normalized data layer
+sequel_MAS_iso_counts <- LayerData(MAS_analysis, assay = "iso", layer = 'data')
+
+# 3. Run singleR  (takes a while)
+pred_MAS_iso <- SingleR(test = sequel_MAS_iso_counts,
+        ref = ref,
+        labels = ref$label.fine)
+
+head(pred_MAS_iso)
+
+# 4. Save to meta
+MAS_analysis$iso_singleR.labels <- pred_MAS_iso$labels[match(rownames(MAS_analysis@meta.data), rownames(pred_MAS_iso))]
+
+pred_MAS_iso
+pred_MAS_iso$scores
+
+plotScoreHeatmap(pred_MAS_iso)
+
+# ...Based on deltas across cells ----------
+
+plotDeltaDistribution(pred_MAS_iso)
+
+tab_MAS_iso <- table(Assigned=pred_MAS_iso$labels, Clusters=MAS_analysis$seurat_clusters_iso)
+
+pheatmap(log10(tab_MAS_iso+10), color = colorRampPalette(c('white','blue'))(10))
+
+#------JC 
+
+# 1. Check iso is default assay
+DefaultAssay(JC_analysis) <- 'iso'
+
+# 2. Extract normalized data layer
+sequel_JC_iso_counts <- LayerData(JC_analysis, assay = "iso", layer = 'data')
+
+# 3. Run singleR (takes a while)
+pred_JC_iso <- SingleR(test = sequel_JC_iso_counts,
+        ref = ref,
+        labels = ref$label.fine)
+
+head(pred_JC_iso)
+
+# 4. Save to meta
+JC_analysis$iso_singleR.labels <- pred_JC_iso$labels[match(rownames(JC_analysis@meta.data), rownames(pred_JC_iso))]
+
+pred_JC_iso
+pred_JC_iso$scores
+
+plotScoreHeatmap(pred_JC_iso)
+
+# ...Based on deltas across cells ----------
+
+plotDeltaDistribution(pred_JC_iso)
+
+tab_JC_iso <- table(Assigned=pred_JC_iso$labels, Clusters=JC_analysis$seurat_clusters_iso)
+
+pheatmap(log10(tab_JC_iso+10), color = colorRampPalette(c('white','blue'))(10))
+```
+
+```{r 18 RNA+iso WNN multimodal clustering MAS & JC}
+# switch back to genes assay
+DefaultAssay(MAS_analysis) <- 'RNA'
+
+# run the WNN
+MAS_analysis <- FindMultiModalNeighbors(
+  MAS_analysis, reduction.list = list("integrated.cca", "harmony_iso"),
+  dims.list = list(1:30, 1:30), modality.weight.name = "RNA.weight"
+)
+
+   # UMAP and clustering, make sure to use the WNN output!
+MAS_analysis <- RunUMAP(
+  MAS_analysis,
+  nn.name = "weighted.nn",
+  reduction.name = "wnn.umap",
+  reduction.key = "wnnUMAP_"
+)
+
+MAS_analysis <- FindClusters(
+  MAS_analysis,
+  graph.name = "wsnn",
+  algorithm = 3,
+  resolution = 0.8,
+  verbose = FALSE
+)
+
+MAS_analysis$seurat_clusters_wnn <- MAS_analysis$seurat_clusters
+
+# plot clusters from each analysis on the respective UMAPs
+p1 <- DimPlot(MAS_analysis, group.by = 'seurat_clusters_RNA', label=TRUE, reduction='umap') +
+   NoLegend() + ggtitle('Gene-level clusters')
+p2 <- DimPlot(MAS_analysis, group.by = 'seurat_clusters_iso', label=TRUE, reduction='umap_iso') +
+   NoLegend() + ggtitle('Isoform-level clusters')
+p3 <- DimPlot(MAS_analysis, group.by = 'seurat_clusters_wnn', label=TRUE, reduction='wnn.umap') +
+   NoLegend() + ggtitle('Gene + Isoform WNN')
+
+# assemble with patchwork
+p1 | p2 | p3
+
+VlnPlot(
+  MAS_analysis,
+  features = "iso.weight",
+  group.by = 'seurat_clusters_iso',
+  sort = TRUE,
+  pt.size=0) + 
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  geom_hline(yintercept=0.5, linetype='dashed', color='black') +
+  xlab('WNN clusters')
+
+library(ggsankey)
+
+df <- MAS_analysis@meta.data %>% 
+  ggsankey::make_long(seurat_clusters_RNA, seurat_clusters_wnn, seurat_clusters_iso)
+
+p <- ggplot(df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(node),
+               label = node)) +
+  geom_sankey() +
+  geom_sankey_label(size=4) +
+  theme_sankey(base_size = 16) + NoLegend() +
+  scale_x_discrete(labels=c(
+    'seurat_clusters_RNA' = 'Genes',
+    'seurat_clusters_wnn' = 'WNN',
+    'seurat_clusters_iso' = 'Isoforms'
+    )) + ggtitle('Sequel IIe MAS-seq')
+p
+
+#-----JC
+
+DefaultAssay(JC_analysis) <- 'RNA'
+
+# run the WNN
+JC_analysis <- FindMultiModalNeighbors(
+  JC_analysis, reduction.list = list("integrated.cca", "harmony_iso"),
+  dims.list = list(1:30, 1:30), modality.weight.name = "RNA.weight"
+)
+
+   # UMAP and clustering, make sure to use the WNN output!
+JC_analysis <- RunUMAP(
+  JC_analysis,
+  nn.name = "weighted.nn",
+  reduction.name = "wnn.umap",
+  reduction.key = "wnnUMAP_"
+)
+
+JC_analysis <- FindClusters(
+  JC_analysis,
+  graph.name = "wsnn",
+  algorithm = 3,
+  resolution = 0.8,
+  verbose = FALSE
+)
+
+JC_analysis$seurat_clusters_wnn <- JC_analysis$seurat_clusters
+
+# plot clusters from each analysis on the respective UMAPs
+p4 <- DimPlot(JC_analysis, group.by = 'seurat_clusters_RNA', label=TRUE, reduction='umap') +
+   NoLegend() + ggtitle('Gene-level clusters')
+p5 <- DimPlot(JC_analysis, group.by = 'seurat_clusters_iso', label=TRUE, reduction='umap_iso') +
+   NoLegend() + ggtitle('Isoform-level clusters')
+p6 <- DimPlot(JC_analysis, group.by = 'seurat_clusters_wnn', label=TRUE, reduction='wnn.umap') +
+   NoLegend() + ggtitle('Gene + Isoform WNN')
+
+# assemble with patchwork
+p4 | p5 | p6
+
+VlnPlot(
+  JC_analysis,
+  features = "iso.weight",
+  group.by = 'seurat_clusters_iso',
+  sort = TRUE,
+  pt.size=0) + 
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  geom_hline(yintercept=0.5, linetype='dashed', color='black') +
+  xlab('WNN clusters')
+
+library(ggsankey)
+
+df_jc <- JC_analysis@meta.data %>% 
+  ggsankey::make_long(seurat_clusters_RNA, seurat_clusters_wnn, seurat_clusters_iso)
+
+p_jc <- ggplot(df_jc, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(node),
+               label = node)) +
+  geom_sankey() +
+  geom_sankey_label(size=4) +
+  theme_sankey(base_size = 16) + NoLegend() +
+  scale_x_discrete(labels=c(
+    'seurat_clusters_RNA' = 'Genes',
+    'seurat_clusters_wnn' = 'WNN',
+    'seurat_clusters_iso' = 'Isoforms'
+    ))+ ggtitle('Sequel IIe MAS-seq with Jumpcode treatment')
+p_jc
+```
+
+```{r 19 Adding illumina cell annots to meta data}
+# This step integrates the cell type annotations stored in @meta.data from the Illumina scRNAseq object (same sample). Cell barcodes common to both objects are identified, and cell type labels from the Illumina object are added to the sequel@meta.data under $illumina_annotation.
+
+# To do this, you must first load the Illumina Seurat object. Ensure that the file `illumina_analysed_sobj.rds` is located in the `data/illumina/` directory.
+
+# Load Illumina Seurat object
+illumina <- readRDS("data/illumina/illumina_analysed_sobj.rds") 
+illumina_meta <- illumina@meta.data
+
+# extract meta
+MAS_meta <- MAS_analysis@meta.data
+
+#clean BCs
+MAS_meta$rev_comp_bc <- MAS_meta$barcode %>% gsub("-.*", "", .)
+
+# NOTE: you may need to use reverse complement barcode sequence for this step to identify matching cells across datasets
+# to get rev comp barcode sequence:
+
+library(dplyr)
+library(Biostrings)
+
+reverse_complement <- function(barcodes) {
+    as.character(reverseComplement(DNAStringSet(barcodes)))
+}
+
+MAS_meta$rev_comp_bc <- reverse_complement(MAS_meta$rev_comp_bc)
+
+# Check intersect 
+common_barcodes_MAS_illumina <- intersect(MAS_meta$rev_comp_bc, illumina_meta$barcode)
+
+length(common_barcodes_MAS_illumina)  # returns the number of matching barcodes = 4192
+
+# Left-join illumina cell type annots to sequel sobj
+MAS_meta <- MAS_meta %>%
+  left_join(
+    illumina_meta %>% select(barcode, cell_types),  # Use barcode and cell_types
+    by = c("rev_comp_bc" = "barcode")             # Match rev_comp_bc in sequel to barcode in illumina_meta
+  )
+
+# Rename the column for clarity
+colnames(MAS_meta)[which(colnames(MAS_meta) == "cell_types")] <- "illumina_annotation"
+
+# Change rownames back to cell barcodes BEFORE re-writing meta.data
+
+MAS_rownames <- colnames(MAS_analysis)
+rownames(MAS_meta) <- MAS_rownames
+
+# Update metadata
+MAS_analysis@meta.data <- MAS_meta
+
+-----------------
+# JC
+  
+# extract meta
+JC_meta <- JC_analysis@meta.data
+
+JC_meta$rev_comp_bc <- JC_meta$barcode %>% gsub("-.*", "", .)
+
+JC_meta$rev_comp_bc <- reverse_complement(JC_meta$rev_comp_bc)
+
+# Check intersect 
+common_barcodes_JC_illumina <- intersect(JC_meta$rev_comp_bc, illumina_meta$barcode)
+
+length(common_barcodes_JC_illumina)  # returns the number of matching barcodes = 4200
+
+JC_meta <- JC_meta %>%
+  left_join(
+    illumina_meta %>% select(barcode, cell_types),  # Use barcode and cell_types
+    by = c("rev_comp_bc" = "barcode")             # Match rev_comp_bc in sequel to barcode in illumina_meta
+  )
+
+# Rename the column for clarity
+colnames(JC_meta)[which(colnames(JC_meta) == "cell_types")] <- "illumina_annotation"
+
+# Change rownames back to cell barcodes BEFORE re-writing meta.data
+
+JC_rownames <- colnames(JC_analysis)
+rownames(JC_meta) <- JC_rownames
+
+# Update metadata
+JC_analysis@meta.data <- JC_meta
+```
+
+```{r 20 Assigning final cell type annotations to cells based on markers and predictions - MAS & JC}
+
+# Adding final publication annotations for seurat obj on combined gene and iso cluster level
+
+# Manual cell type annotations were assigned based on a combination of approaches, including:
+# - Differential expression analysis from FindAllMarkers() (cross-checking marker expression)
+# - Predictions from scType and SingleR 
+# The cluster numbers assigned here are specific to this analysis and may differ when re-running 
+# on a different dataset or with different clustering parameters. Therefore, users should always cross-check marker expression before applying annotations.
+
+manual_sequel_MAS_idents <- c("Monocytes:CD14+", 
+                       "Naive_Tcells:CD4+",
+                       "Tcells:CD8+", 
+                       "Naive_Tcells:CD4+",
+                       "Tcells_reg:CD4+",
+                       "Tcells_reg:CD4+", 
+                       "NK cells", 
+                       "CD8+_NKT-like_cells",
+                       "γδ-T cells", 
+                       "B_cells", 
+                       "Monocytes:CD14+",
+                       "B_cells",
+                       "Naive_Tcells:CD8+",
+                       "Naive_Tcells:CD8+",
+                       "DCs",
+                       "Platelets",
+                       "Macrophages",
+                       "Plasmacytoid DCs")
+
+names(manual_sequel_MAS_idents) <- levels(MAS_analysis$seurat_clusters_RNA)
+
+sequel_mas_sobj <- RenameIdents(MAS_analysis, manual_sequel_MAS_idents)
+
+DimPlot(MAS_analysis, label = TRUE, pt.size = 0.5, reduction = "umap")
+
+MAS_analysis@meta.data$manual_annotation <-  Idents(MAS_analysis)
+
+#------JC
+
+manual_sequel_JC_idents <- c("Monocytes:CD14+", 
+                       "Naive_Tcells:CD4+",
+                       "Tcells:CD4+", 
+                       "Naive_Tcells:CD4+",
+                       "Tcells_reg:CD4+",
+                       "Tcells:CD8+", 
+                       "CD8+_NKT-like_cells", 
+                       "Naive_Tcells:CD8+",
+                       "NK cells", 
+                       "B_cells", 
+                       "B_cells",
+                       "Monocytes:CD14+",
+                       "γδ-T cells",
+                       "Macrophages",
+                       "NK cells",
+                       "DCs",
+                       "Plasmacytoid DCs",
+                       "Macrophages",
+                       "Platelets")
+
+names(manual_sequel_JC_idents) <- levels(JC_analysis$seurat_clusters_RNA)
+
+sequel_jc_sobj <- RenameIdents(JC_analysis, manual_sequel_JC_idents)
+
+DimPlot(JC_analysis, label = TRUE, pt.size = 0.5, reduction = "umap")
+
+JC_analysis@meta.data$manual_annotation <-  Idents(JC_analysis)
+```
+
+```{r 21.1  TRUST4 MAS annotation - update file paths}
+# Input files:
+# These files contain barcode information for different immune cell types (B cells, αβ T cells, γδ T cells) as reconstructed by TRUST4 from Sequel IIe sequencing data.
+# They should be located within the `Ig_reconstruction_TRUST4/sequel_#MASorJC_TRUST4/` directory.
+
+# Define the directory path 
+trust4_dir <- "~/Ig_reconstruction_TRUST4/sequel_MAS_TRUST4/"
+
+# 1. Load data
+sequel_abT <- read.delim(file.path(trust4_dir, "sample1_sequel_MAS_defaultsettings_abTbarcodes.txt", col.names = "barcode")
+sequel_abT_2 <- read.delim(file.path(trust4_dir, "sample2_sequel_MAS_defaultsettings_abTbarcodes.txt", col.names = "barcode")
+sequel_abT <- rbind(sequel_abT, sequel_abT_2)
+
+sequel_B <- read.delim(file.path(trust4_dir, "sample1_sequel_MAS_defaultsettings_Bbarcodes.txt", col.names = "barcode")
+sequel_B_2 <- read.delim(file.path(trust4_dir, "sample2_sequel_MAS_defaultsettings_Bbarcodes.txt", col.names = "barcode")
+sequel_B <- rbind(sequel_B, sequel_B_2)
+
+sequel_gdT <- read.delim(file.path(trust4_dir, "sample1_sequel_MAS_defaultsettings_gdTbarcodes.txt", col.names = "barcode")
+sequel_gdT_2 <- read.delim(file.path(trust4_dir, "sample2_sequel_MAS_defaultsettings_gdTbarcodes.txt", col.names = "barcode")
+sequel_gdT <- rbind(sequel_gdT, sequel_gdT_2)
+
+# 2. Update TRUST4 column where there's a match
+MAS_meta <- MAS_analysis@meta.data
+MAS_meta$TRUST4 <- NA  # Ensure TRUST4 is initialized with NA
+
+# 3. Get the matching cell indices
+MAS_barcodes <- rownames(MAS_meta)
+clean_MAS_barcodes <- MAS_barcodes %>% gsub("-.*", "", .)
+
+matching_sequel_abT_indices <- which(clean_MAS_barcodes %in% sequel_abT$barcode)
+matching_sequel_B_indices <- which(clean_MAS_barcodes %in% sequel_B$barcode)
+matching_sequel_gdT_indices <- which(clean_MAS_barcodes %in% sequel_gdT$barcode)
+
+# 4. Update TRUST4 column where there's a match
+MAS_meta$TRUST4[matching_sequel_abT_indices] <- "TCRab"
+MAS_meta$TRUST4[matching_sequel_B_indices] <- "B"
+MAS_meta$TRUST4[matching_sequel_gdT_indices] <- "TCRgd"
+
+MAS_analysis@meta.data <- MAS_meta
+```
+
+```{r 21.2 TRUST4 JC annotation - update file paths}
+# Define the directory path (modify if needed, but keep relative)
+trust4_dir <- "~/Ig_reconstruction_TRUST4/sequel_JC_TRUST4/"
+
+# 1. Load data
+sequel_abT <- read.delim(file.path(trust4_dir, "sample1_sequel_JC_defaultsettings_abTbarcodes.txt", col.names = "barcode")
+sequel_abT_2 <- read.delim(file.path(trust4_dir, "sample2_sequel_JC_defaultsettings_abTbarcodes.txt", col.names = "barcode")
+sequel_abT <- rbind(sequel_abT, sequel_abT_2)
+
+sequel_B <- read.delim(file.path(trust4_dir, "sample1_sequel_JC_defaultsettings_Bbarcodes.txt", col.names = "barcode")
+sequel_B_2 <- read.delim(file.path(trust4_dir, "sample2_sequel_JC_defaultsettings_Bbarcodes.txt", col.names = "barcode")
+sequel_B <- rbind(sequel_B, sequel_B_2)
+
+sequel_gdT <- read.delim(file.path(trust4_dir, "sample1_sequel_JC_defaultsettings_gdTbarcodes.txt", col.names = "barcode")
+sequel_gdT_2 <- read.delim(file.path(trust4_dir, "sample2_sequel_JC_defaultsettings_gdTbarcodes.txt", col.names = "barcode")
+sequel_gdT <- rbind(sequel_gdT, sequel_gdT_2)
+
+# 2. Metadata TRUST4 initialized with NA
+JC_meta <- JC_analysis@meta.data
+JC_meta$TRUST4 <- NA  
+
+# Get the matching row indices
+JC_rownames <- rownames(JC_meta)
+clean_JC_rownames <- JC_rownames %>% gsub("-.*", "", .)
+
+matching_sequel_abT_indices <- which(clean_JC_rownames %in% sequel_abT$barcode)
+matching_sequel_B_indices <- which(clean_JC_rownames %in% sequel_B$barcode)
+matching_sequel_gdT_indices <- which(clean_JC_rownames %in% sequel_gdT$barcode)
+
+# Update TRUST4 column where there's a match
+JC_meta$TRUST4[matching_sequel_abT_indices] <- "TCRab"
+JC_meta$TRUST4[matching_sequel_B_indices] <- "B"
+JC_meta$TRUST4[matching_sequel_gdT_indices] <- "TCRgd"
+
+JC_analysis@meta.data <- sequel_JC_meta
+```
+
